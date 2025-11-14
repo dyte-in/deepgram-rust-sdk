@@ -234,7 +234,7 @@ impl Deepgram {
         // This cannot panic because we are converting a static value
         // that is known-good.
         let base_url = DEEPGRAM_BASE_URL.try_into().unwrap();
-        Self::inner_constructor(base_url, Some(auth))
+        Self::inner_constructor(base_url, Some(auth), None)
     }
 
     /// Construct a new Deepgram client with a temporary token.
@@ -243,7 +243,7 @@ impl Deepgram {
     pub fn with_temp_token<T: AsRef<str>>(temp_token: T) -> Result<Self> {
         let auth = AuthMethod::TempToken(RedactedString(temp_token.as_ref().to_owned()));
         let base_url = DEEPGRAM_BASE_URL.try_into().unwrap();
-        Self::inner_constructor(base_url, Some(auth))
+        Self::inner_constructor(base_url, Some(auth), None)
     }
 
     /// Construct a new Deepgram client with the specified base URL.
@@ -283,7 +283,7 @@ impl Deepgram {
         U::Error: std::fmt::Debug,
     {
         let base_url = base_url.try_into().map_err(|_| DeepgramError::InvalidUrl)?;
-        Self::inner_constructor(base_url, None)
+        Self::inner_constructor(base_url, None, None)
     }
 
     /// Construct a new Deepgram client with the specified base URL and
@@ -321,7 +321,38 @@ impl Deepgram {
     {
         let base_url = base_url.try_into().map_err(|_| DeepgramError::InvalidUrl)?;
         let auth = AuthMethod::ApiKey(RedactedString(api_key.as_ref().to_owned()));
-        Self::inner_constructor(base_url, Some(auth))
+        Self::inner_constructor(base_url, Some(auth), None)
+    }
+
+    /// Construct a new Deepgram client with the specified base URL and
+    /// custom headers.
+    ///
+    /// There could be a custom deployment of deepgram and you wanna
+    /// send additional headers.
+    ///
+    /// # Example:
+    ///
+    /// ```
+    /// # use deepgram::Deepgram;
+    /// let mut headers = HeaderMap::new();
+    /// headers.insert("client-id", "custom-client-id");
+    /// let deepgram = Deepgram::with_base_url_and_headers(
+    ///     "http://localhost:8080",
+    ///     headers
+    /// ).unwrap();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Errors under the same conditions as [`reqwest::ClientBuilder::build`], or if `base_url`
+    /// is not a valid URL.
+    pub fn with_base_url_and_headers<U>(base_url: U, headers: HeaderMap) -> Result<Self>
+    where
+        U: TryInto<Url>,
+        U::Error: std::fmt::Debug,
+    {
+        let base_url = base_url.try_into().map_err(|_| DeepgramError::InvalidUrl)?;
+        Self::inner_constructor(base_url, None, Some(headers))
     }
 
     /// Construct a new Deepgram client with the specified base URL and temp token.
@@ -333,10 +364,14 @@ impl Deepgram {
     {
         let base_url = base_url.try_into().map_err(|_| DeepgramError::InvalidUrl)?;
         let auth = AuthMethod::TempToken(RedactedString(temp_token.as_ref().to_owned()));
-        Self::inner_constructor(base_url, Some(auth))
+        Self::inner_constructor(base_url, Some(auth), None)
     }
 
-    fn inner_constructor(base_url: Url, auth: Option<AuthMethod>) -> Result<Self> {
+    fn inner_constructor(
+        base_url: Url,
+        auth: Option<AuthMethod>,
+        custom_headers: Option<HeaderMap>,
+    ) -> Result<Self> {
         static USER_AGENT: &str = concat!(
             env!("CARGO_PKG_NAME"),
             "/",
@@ -347,7 +382,7 @@ impl Deepgram {
         if base_url.cannot_be_a_base() {
             return Err(DeepgramError::InvalidUrl);
         }
-        let authorization_header = {
+        let mut headers = {
             let mut header = HeaderMap::new();
             if let Some(auth) = &auth {
                 let header_value = auth.header_value();
@@ -358,12 +393,16 @@ impl Deepgram {
             header
         };
 
+        if let Some(custom_headers) = custom_headers {
+            headers.extend(custom_headers);
+        }
+
         Ok(Deepgram {
             auth,
             base_url,
             client: reqwest::Client::builder()
                 .user_agent(USER_AGENT)
-                .default_headers(authorization_header)
+                .default_headers(headers)
                 .build()?,
         })
     }
