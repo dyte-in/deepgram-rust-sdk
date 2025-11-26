@@ -667,11 +667,20 @@ impl WebsocketHandle {
                 .header("upgrade", "websocket")
                 .header("sec-websocket-version", "13");
 
-            let builder = if let Some(auth) = &builder.deepgram.auth {
+            let mut http_builder = if let Some(auth) = &builder.deepgram.auth {
                 http_builder.header("authorization", auth.header_value())
             } else {
                 http_builder
             };
+
+            let builder = if let Some(custom_headers) = &builder.deepgram.headers {
+                let headers_mut = http_builder.headers_mut().unwrap();
+                headers_mut.extend(custom_headers.clone());
+                http_builder
+            } else {
+                http_builder
+            };
+
             builder.body(())?
         };
 

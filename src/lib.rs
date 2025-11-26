@@ -139,6 +139,8 @@ pub struct Deepgram {
     base_url: Url,
     #[cfg_attr(not(feature = "listen"), allow(unused))]
     client: reqwest::Client,
+    #[cfg_attr(not(feature = "listen"), allow(unused))]
+    headers: Option<HeaderMap>,
 }
 
 /// Errors that may arise from the [`deepgram`](crate) crate.
@@ -393,13 +395,14 @@ impl Deepgram {
             header
         };
 
-        if let Some(custom_headers) = custom_headers {
+        if let Some(custom_headers) = custom_headers.clone() {
             headers.extend(custom_headers);
         }
 
         Ok(Deepgram {
             auth,
             base_url,
+            headers: custom_headers,
             client: reqwest::Client::builder()
                 .user_agent(USER_AGENT)
                 .default_headers(headers)
