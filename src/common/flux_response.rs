@@ -63,6 +63,29 @@ pub enum FluxResponse {
         description: String,
     },
 
+    /// Configuration update was successfully applied
+    ConfigureSuccess {
+        /// Updated threshold values (echoed back from server)
+        #[allow(missing_docs)]
+        thresholds: Option<ConfigureThresholds>,
+
+        /// Updated keyterms list (echoed back from server)
+        #[allow(missing_docs)]
+        keyterms: Option<Vec<String>>,
+    },
+
+    /// Configuration update failed validation
+    ConfigureFailure {
+        #[allow(missing_docs)]
+        sequence_id: u32,
+
+        #[allow(missing_docs)]
+        code: String,
+
+        #[allow(missing_docs)]
+        description: String,
+    },
+
     /// An unknown message type received from the server.
     ///
     /// This variant is used for forward-compatibility when the server sends
@@ -93,6 +116,15 @@ enum TaggedFluxResponse {
     },
     #[serde(rename = "Error")]
     FatalError {
+        sequence_id: u32,
+        code: String,
+        description: String,
+    },
+    ConfigureSuccess {
+        thresholds: Option<ConfigureThresholds>,
+        keyterms: Option<Vec<String>>,
+    },
+    ConfigureFailure {
         sequence_id: u32,
         code: String,
         description: String,
@@ -139,6 +171,22 @@ impl From<TaggedFluxResponse> for FluxResponse {
                 code,
                 description,
             },
+            TaggedFluxResponse::ConfigureSuccess {
+                thresholds,
+                keyterms,
+            } => FluxResponse::ConfigureSuccess {
+                thresholds,
+                keyterms,
+            },
+            TaggedFluxResponse::ConfigureFailure {
+                sequence_id,
+                code,
+                description,
+            } => FluxResponse::ConfigureFailure {
+                sequence_id,
+                code,
+                description,
+            },
         }
     }
 }
@@ -153,7 +201,7 @@ impl<'de> Deserialize<'de> for FluxResponse {
         let type_str = value.get("type").and_then(|t| t.as_str());
 
         match type_str {
-            Some("Connected" | "TurnInfo" | "Error") => {
+            Some("Connected" | "TurnInfo" | "Error" | "ConfigureSuccess" | "ConfigureFailure") => {
                 serde_json::from_value::<TaggedFluxResponse>(value)
                     .map(FluxResponse::from)
                     .map_err(de::Error::custom)
@@ -215,6 +263,28 @@ impl Serialize for FluxResponse {
                 };
                 tagged.serialize(serializer)
             }
+            FluxResponse::ConfigureSuccess {
+                thresholds,
+                keyterms,
+            } => {
+                let tagged = TaggedFluxResponse::ConfigureSuccess {
+                    thresholds: thresholds.clone(),
+                    keyterms: keyterms.clone(),
+                };
+                tagged.serialize(serializer)
+            }
+            FluxResponse::ConfigureFailure {
+                sequence_id,
+                code,
+                description,
+            } => {
+                let tagged = TaggedFluxResponse::ConfigureFailure {
+                    sequence_id: *sequence_id,
+                    code: code.clone(),
+                    description: description.clone(),
+                };
+                tagged.serialize(serializer)
+            }
             FluxResponse::Unknown(value) => value.serialize(serializer),
         }
     }
@@ -253,6 +323,25 @@ pub struct FluxWord {
 
     #[allow(missing_docs)]
     pub confidence: f64,
+}
+
+/// Threshold configuration for Flux end-of-turn detection.
+///
+/// Used in both outgoing `Configure` messages and incoming `ConfigureSuccess` responses.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ConfigureThresholds {
+    /// Confidence threshold for standard end-of-turn detection (0.5-0.9)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eot_threshold: Option<f64>,
+
+    /// Confidence threshold for eager end-of-turn detection (0.3-0.9). Must be <= eot_threshold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eager_eot_threshold: Option<f64>,
+
+    /// Maximum silence duration in ms before forcing turn end (500-10000)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eot_timeout_ms: Option<u32>,
 }
 
 #[cfg(test)]
@@ -321,5 +410,50 @@ mod tests {
         let roundtrip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         let original: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn deserialize_configure_success() {
+        let json = r#"{"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 0.8, "eot_timeout_ms": 5000}, "keyterms": ["apple", "banana"]}"#;
+        let response: FluxResponse = serde_json::from_str(json).unwrap();
+        match response {
+            FluxResponse::ConfigureSuccess {
+                thresholds,
+                keyterms,
+            } => {
+                let t = thresholds.unwrap();
+                assert_eq!(t.eot_threshold, Some(0.8));
+                assert_eq!(t.eot_timeout_ms, Some(5000));
+                assert_eq!(t.eager_eot_threshold, None);
+                assert_eq!(keyterms.unwrap(), vec!["apple", "banana"]);
+            }
+            _ => panic!("expected ConfigureSuccess variant"),
+        }
+    }
+
+    #[test]
+    fn deserialize_configure_failure() {
+        let json = r#"{"type": "ConfigureFailure", "sequence_id": 42, "code": "INVALID_THRESHOLD", "description": "eager_eot_threshold must be less than or equal to eot_threshold"}"#;
+        let response: FluxResponse = serde_json::from_str(json).unwrap();
+        match response {
+            FluxResponse::ConfigureFailure {
+                sequence_id,
+                code,
+                description,
+            } => {
+                assert_eq!(sequence_id, 42);
+                assert_eq!(code, "INVALID_THRESHOLD");
+                assert!(!description.is_empty());
+            }
+            _ => panic!("expected ConfigureFailure variant"),
+        }
+    }
+
+    #[test]
+    fn serialize_roundtrip_configure_success() {
+        let json = r#"{"type":"ConfigureSuccess","thresholds":{"eot_threshold":0.8,"eot_timeout_ms":5000},"keyterms":["apple","banana"]}"#;
+        let response: FluxResponse = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert_eq!(serialized, json);
     }
 }

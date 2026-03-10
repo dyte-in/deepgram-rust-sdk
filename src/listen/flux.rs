@@ -40,7 +40,7 @@ use uuid::Uuid;
 use self::file_chunker::FileChunker;
 use crate::{
     common::{
-        flux_response::FluxResponse,
+        flux_response::{ConfigureThresholds, FluxResponse},
         options::{Encoding, Options},
     },
     Deepgram, DeepgramError, Result, Transcription,
@@ -283,16 +283,26 @@ impl FluxBuilder<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "type")]
 enum ControlMessage {
     CloseStream,
+    Configure {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thresholds: Option<ConfigureThresholds>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        keyterms: Option<Vec<String>>,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum WsMessage {
     Audio(Vec<u8>),
     CloseStream,
+    Configure {
+        thresholds: Option<ConfigureThresholds>,
+        keyterms: Option<Vec<String>>,
+    },
 }
 
 #[derive(Debug)]
@@ -318,12 +328,24 @@ impl FluxHandle {
                 .header("sec-websocket-version", "13")
                 .header("user-agent", crate::USER_AGENT);
 
-            let builder = if let Some(auth) = &builder.deepgram.auth {
+            let http_builder = if let Some(auth) = &builder.deepgram.auth {
                 http_builder.header("authorization", auth.header_value())
             } else {
                 http_builder
             };
-            builder.body(())?
+            
+            // Add custom headers from the Deepgram client if present
+            let http_builder = if let Some(custom_headers) = &builder.deepgram.headers {
+                let mut http_builder = http_builder;
+                for (key, value) in custom_headers.iter() {
+                    http_builder = http_builder.header(key.clone(), value.clone());
+                }
+                http_builder
+            } else {
+                http_builder
+            };
+            
+            http_builder.body(())?
         };
 
         let (ws_stream, upgrade_response) = tokio_tungstenite::connect_async(request).await?;
@@ -370,6 +392,55 @@ impl FluxHandle {
                 .map_err(|err| DeepgramError::InternalClientError(err.into()))?;
             self.message_tx.close_channel();
         }
+        Ok(())
+    }
+
+    /// Send a Configure control message to update stream settings mid-stream.
+    ///
+    /// Updates are processed in order with the audio stream and take effect immediately.
+    /// Omitted fields retain their current values. Keyterms replace the entire list (not merge).
+    ///
+    /// The server will respond with either a `ConfigureSuccess` or `ConfigureFailure` via
+    /// the response stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `thresholds` - Optional threshold updates. Individual fields within can also be None
+    ///   to leave them unchanged.
+    /// * `keyterms` - Optional replacement keyterms list. Pass `Some(vec![])` to clear all
+    ///   keyterms. Pass `None` to leave keyterms unchanged.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use deepgram::common::flux_response::ConfigureThresholds;
+    /// # async fn example(handle: &mut deepgram::listen::flux::FluxHandle) {
+    /// // Update only the EOT threshold
+    /// handle.send_configure(
+    ///     Some(ConfigureThresholds {
+    ///         eot_threshold: Some(0.8),
+    ///         eager_eot_threshold: None,
+    ///         eot_timeout_ms: None,
+    ///     }),
+    ///     None,
+    /// ).await.unwrap();
+    ///
+    /// // Replace keyterms
+    /// handle.send_configure(
+    ///     None,
+    ///     Some(vec!["activate".into(), "cancel".into()]),
+    /// ).await.unwrap();
+    /// # }
+    /// ```
+    pub async fn send_configure(
+        &mut self,
+        thresholds: Option<ConfigureThresholds>,
+        keyterms: Option<Vec<String>>,
+    ) -> Result<()> {
+        self.message_tx
+            .send(WsMessage::Configure { thresholds, keyterms })
+            .await
+            .map_err(|err| DeepgramError::InternalClientError(err.into()))?;
         Ok(())
     }
 
@@ -473,6 +544,16 @@ async fn run_flux_worker(
                     match message {
                         Some(WsMessage::Audio(audio)) => {
                             if let Err(err) = ws_stream_send.send(Message::Binary(Bytes::from(audio))).await {
+                                if response_tx.send(Err(err.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Some(WsMessage::Configure { thresholds, keyterms }) => {
+                            let control = ControlMessage::Configure { thresholds, keyterms };
+                            if let Err(err) = ws_stream_send.send(Message::Text(
+                                Utf8Bytes::from(serde_json::to_string(&control).unwrap_or_default())
+                            )).await {
                                 if response_tx.send(Err(err.into())).await.is_err() {
                                     break;
                                 }
@@ -634,5 +715,20 @@ mod tests {
         let transcription = dg.transcription();
         let builder = transcription.flux_request_with_options(opts.clone());
         assert_eq!(builder.urlencoded().unwrap(), opts.urlencoded().unwrap())
+    }
+
+    #[test]
+    fn test_configure_message_serialization() {
+        use super::ControlMessage;
+        let control = ControlMessage::Configure {
+            thresholds: Some(crate::common::flux_response::ConfigureThresholds {
+                eot_threshold: Some(0.8),
+                eager_eot_threshold: None,
+                eot_timeout_ms: None,
+            }),
+            keyterms: Some(vec!["hello".to_string()]),
+        };
+        let serialized = serde_json::to_string(&control).unwrap();
+        assert_eq!(serialized, r#"{"type":"Configure","thresholds":{"eot_threshold":0.8},"keyterms":["hello"]}"#);
     }
 }
