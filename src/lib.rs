@@ -24,6 +24,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
 
+pub mod auth;
 #[cfg(feature = "listen")]
 pub mod common;
 #[cfg(feature = "listen")]
@@ -34,6 +35,13 @@ pub mod manage;
 pub mod speak;
 
 static DEEPGRAM_BASE_URL: &str = "https://api.deepgram.com";
+
+pub(crate) static USER_AGENT: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+    " rust",
+);
 
 /// Transcribe audio using Deepgram's automated speech recognition.
 ///
@@ -374,13 +382,6 @@ impl Deepgram {
         auth: Option<AuthMethod>,
         custom_headers: Option<HeaderMap>,
     ) -> Result<Self> {
-        static USER_AGENT: &str = concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("CARGO_PKG_VERSION"),
-            " rust",
-        );
-
         if base_url.cannot_be_a_base() {
             return Err(DeepgramError::InvalidUrl);
         }
